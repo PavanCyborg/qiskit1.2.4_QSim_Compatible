@@ -16,11 +16,14 @@ import copy
 import warnings
 
 from qiskit.circuit.quantumcircuit import QuantumCircuit
+from qiskit.pulse.schedule import Schedule
 from qiskit.exceptions import QiskitError
 from qiskit.quantum_info.states import statevector
-from qiskit.result.models import ExperimentResult, MeasLevel
+from qiskit.result.models import ExperimentResult
 from qiskit.result import postprocess
 from qiskit.result.counts import Counts
+from qiskit.qobj.utils import MeasLevel
+from qiskit.qobj import QobjHeader
 
 
 class Result:
@@ -29,26 +32,24 @@ class Result:
     Attributes:
         backend_name (str): backend name.
         backend_version (str): backend version, in the form X.Y.Z.
+        qobj_id (str): user-generated Qobj id.
         job_id (str): unique execution id from the backend.
-        success (bool): True if complete input executed correctly. (Implies
+        success (bool): True if complete input qobj executed correctly. (Implies
             each experiment success)
         results (list[ExperimentResult]): corresponding results for array of
-            experiments of the input
-        date (str): optional date field
-        status (str): optional status field
-        header (dict): an optional free form dictionary header
+            experiments of the input qobj
     """
 
     _metadata = {}
 
     def __init__(
         self,
-        *,
-        backend_name=None,
-        backend_version=None,
-        job_id=None,
-        success=None,
-        results=None,
+        backend_name,
+        backend_version,
+        qobj_id,
+        job_id,
+        success,
+        results,
         date=None,
         status=None,
         header=None,
@@ -57,6 +58,7 @@ class Result:
         self._metadata = {}
         self.backend_name = backend_name
         self.backend_version = backend_version
+        self.qobj_id = qobj_id
         self.job_id = job_id
         self.success = success
         self.results = results
@@ -68,7 +70,7 @@ class Result:
     def __repr__(self):
         out = (
             f"Result(backend_name='{self.backend_name}', backend_version='{self.backend_version}',"
-            f" job_id='{self.job_id}', success={self.success},"
+            f" qobj_id='{self.qobj_id}', job_id='{self.job_id}', success={self.success},"
             f" results={self.results}"
         )
         out += f", date={self.date}, status={self.status}, header={self.header}"
@@ -91,7 +93,8 @@ class Result:
             "backend_name": self.backend_name,
             "backend_version": self.backend_version,
             "date": self.date,
-            "header": self.header,
+            "header": None if self.header is None else self.header.to_dict(),
+            "qobj_id": self.qobj_id,
             "job_id": self.job_id,
             "status": self.status,
             "success": self.success,
@@ -121,6 +124,10 @@ class Result:
 
         in_data = copy.copy(data)
         in_data["results"] = [ExperimentResult.from_dict(x) for x in in_data.pop("results")]
+        if in_data.get("header") is not None:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=DeprecationWarning, module="qiskit")
+                in_data["header"] = QobjHeader.from_dict(in_data.pop("header"))
         return cls(**in_data)
 
     def data(self, experiment=None):
@@ -131,10 +138,11 @@ class Result:
         the get_xxx method, and the data will be post-processed for the data type.
 
         Args:
-            experiment (str or QuantumCircuit or int or None): the index of the
+            experiment (str or QuantumCircuit or Schedule or int or None): the index of the
                 experiment. Several types are accepted for convenience::
                 * str: the name of the experiment.
                 * QuantumCircuit: the name of the circuit instance will be used.
+                * Schedule: the name of the schedule instance will be used.
                 * int: the position of the experiment.
                 * None: if there is only one experiment, returns it.
 
@@ -181,7 +189,7 @@ class Result:
         ['00000', '01000', '10100', '10100', '11101', '11100', '00101', ..., '01010']
 
         Args:
-            experiment (str or QuantumCircuit or int or None): the index of the
+            experiment (str or QuantumCircuit or Schedule or int or None): the index of the
                 experiment, as specified by ``data()``.
 
         Returns:
@@ -204,7 +212,7 @@ class Result:
         exp_result = self._get_experiment(experiment)
         try:
             try:  # header is not available
-                header = exp_result.header
+                header = exp_result.header.to_dict()
             except (AttributeError, QiskitError):
                 header = None
 
@@ -229,22 +237,71 @@ class Result:
                 "or a measurement level 0/1 job."
             ) from ex
 
+    # def get_counts(self, experiment=None):
+    #     """Get the histogram data of an experiment.
+
+    #     Args:
+    #         experiment (str or QuantumCircuit or Schedule or int or None): the index of the
+    #             experiment, as specified by ``data([experiment])``.
+
+    #     Returns:
+    #         dict[str, int] or list[dict[str, int]]: a dictionary or a list of
+    #         dictionaries. A dictionary has the counts for each qubit with
+    #         the keys containing a string in binary format and separated
+    #         according to the registers in circuit (e.g. ``0100 1110``).
+    #         The string is little-endian (cr[0] on the right hand side).
+
+    #     Raises:
+    #         QiskitError: if there are no counts for the experiment.
+    #     """
+    #     if experiment is None:
+    #         exp_keys = range(len(self.results))
+    #     else:
+    #         exp_keys = [experiment]
+
+    #     dict_list = []
+    #     for key in exp_keys:
+    #         exp = self._get_experiment(key)
+    #         try:
+    #             header = exp.header.to_dict()
+    #         except (AttributeError, QiskitError):  # header is not available
+    #             header = None
+
+    #         if "counts" in self.data(key).keys():
+    #             if header:
+    #                 counts_header = {
+    #                     k: v
+    #                     for k, v in header.items()
+    #                     if k in {"time_taken", "creg_sizes", "memory_slots"}
+    #                 }
+    #             else:
+    #                 counts_header = {}
+    #             dict_list.append(Counts(self.data(key)["counts"], **counts_header))
+    #         elif "statevector" in self.data(key).keys():
+    #             vec = postprocess.format_statevector(self.data(key)["statevector"])
+    #             dict_list.append(statevector.Statevector(vec).probabilities_dict(decimals=15))
+    #         else:
+    #             raise QiskitError(f'No counts for experiment "{repr(key)}"')
+
+    #     # Return first item of dict_list if size is 1
+    #     if len(dict_list) == 1:
+    #         return dict_list[0]
+    #     else:
+    #         return dict_list
+
     def get_counts(self, experiment=None):
-        """Get the histogram data of an experiment.
+        """Get the histogram data of an experiment, unified for sampler and estimator.
 
         Args:
-            experiment (str or QuantumCircuit or int or None): the index of the
-                experiment, as specified by ``data([experiment])``.
+            experiment (str or QuantumCircuit or Schedule or int or None): 
+                The index of the experiment, as specified by ``data([experiment])``.
 
         Returns:
-            dict[str, int] or list[dict[str, int]]: a dictionary or a list of
-            dictionaries. A dictionary has the counts for each qubit with
-            the keys containing a string in binary format and separated
-            according to the registers in circuit (e.g. ``0100 1110``).
-            The string is little-endian (cr[0] on the right hand side).
+            dict[str, float] or list[dict[str, float]]: a dictionary or a list of
+            dictionaries. Compatible with Qiskit's `Counts` interface for `dm_simulator`.
 
         Raises:
-            QiskitError: if there are no counts for the experiment.
+            QiskitError: if no valid counts, partial probabilities, or density matrix found.
         """
         if experiment is None:
             exp_keys = range(len(self.results))
@@ -252,40 +309,54 @@ class Result:
             exp_keys = [experiment]
 
         dict_list = []
+        
         for key in exp_keys:
             exp = self._get_experiment(key)
             try:
-                header = exp.header
-            except (AttributeError, QiskitError):  # header is not available
-                header = None
+                header = exp.header.to_dict()
+            except (AttributeError, QiskitError):
+                header = {}
 
-            if "counts" in self.data(key).keys():
-                if header:
-                    counts_header = {
-                        k: v
-                        for k, v in header.items()
-                        if k in {"time_taken", "creg_sizes", "memory_slots"}
-                    }
-                else:
-                    counts_header = {}
-                dict_list.append(Counts(self.data(key)["counts"], **counts_header))
-            elif "statevector" in self.data(key).keys():
-                vec = postprocess.format_statevector(self.data(key)["statevector"])
-                dict_list.append(statevector.Statevector(vec).probabilities_dict(decimals=15))
+            data = self.data(key)
+            
+            # --- Unified logic ---
+            if "partial_probability" in data:
+                dict_list.append(data["partial_probability"])
+
+            elif "densitymatrix" in data:
+                density_matrix = data["densitymatrix"]
+                # Extract probabilities from diagonal (real part only)
+                probs = [float(p.real) for p in density_matrix.diagonal()]
+                num_qubits = int(len(probs).bit_length() - 1)
+                bitstrings = [format(i, f'0{num_qubits}b') for i in range(len(probs))]
+                dict_list.append(dict(zip(bitstrings, probs)))
+
+            elif "counts" in data:
+                counts_header = {
+                    k: v for k, v in header.items()
+                    if k in {"time_taken", "creg_sizes", "memory_slots"}
+                }
+                dict_list.append(Counts(data["counts"], **counts_header))
+
+            elif "statevector" in data:
+                vec = postprocess.format_statevector(data["statevector"])
+                dict_list.append(
+                    statevector.Statevector(vec).probabilities_dict(decimals=15)
+                )
+
             else:
-                raise QiskitError(f'No counts for experiment "{repr(key)}"')
+                raise QiskitError(
+                    f'No valid counts, partial_probability, or densitymatrix for experiment "{repr(key)}"'
+                )
 
-        # Return first item of dict_list if size is 1
-        if len(dict_list) == 1:
-            return dict_list[0]
-        else:
-            return dict_list
+        return dict_list[0] if len(dict_list) == 1 else dict_list
+
 
     def get_statevector(self, experiment=None, decimals=None):
         """Get the final statevector of an experiment.
 
         Args:
-            experiment (str or QuantumCircuit or int or None): the index of the
+            experiment (str or QuantumCircuit or Schedule or int or None): the index of the
                 experiment, as specified by ``data()``.
             decimals (int): the number of decimals in the statevector.
                 If None, does not round.
@@ -307,7 +378,7 @@ class Result:
         """Get the final unitary of an experiment.
 
         Args:
-            experiment (str or QuantumCircuit or int or None): the index of the
+            experiment (str or QuantumCircuit or Schedule or int or None): the index of the
                 experiment, as specified by ``data()``.
             decimals (int): the number of decimals in the unitary.
                 If None, does not round.
@@ -328,7 +399,7 @@ class Result:
         """Return a single experiment result from a given key.
 
         Args:
-            key (str or QuantumCircuit or int or None): the index of the
+            key (str or QuantumCircuit or Schedule or int or None): the index of the
                 experiment, as specified by ``data()``.
 
         Returns:
@@ -346,8 +417,8 @@ class Result:
                 )
             key = 0
 
-        # Key is a QuantumCircuit or str: retrieve result by name.
-        if isinstance(key, QuantumCircuit):
+        # Key is a QuantumCircuit/Schedule or str: retrieve result by name.
+        if isinstance(key, (QuantumCircuit, Schedule)):
             key = key.name
         # Key is an integer: return result by index.
         if isinstance(key, int):
@@ -356,12 +427,11 @@ class Result:
             except IndexError as ex:
                 raise QiskitError(f'Result for experiment "{key}" could not be found.') from ex
         else:
-            # Look into `result[x].header["name"]` for the names.
+            # Look into `result[x].header.name` for the names.
             exp = [
                 result
                 for result in self.results
-                if getattr(result, "header", None) is not None
-                and getattr(result, "header").get("name", "") == key
+                if getattr(getattr(result, "header", None), "name", "") == key
             ]
 
             if len(exp) == 0:
