@@ -69,23 +69,16 @@ class Result:
 
     def __repr__(self):
         out = (
-            "Result(backend_name='%s', backend_version='%s', qobj_id='%s', "
-            "job_id='%s', success=%s, results=%s"
-            % (
-                self.backend_name,
-                self.backend_version,
-                self.qobj_id,
-                self.job_id,
-                self.success,
-                self.results,
-            )
+            f"Result(backend_name='{self.backend_name}', backend_version='{self.backend_version}',"
+            f" qobj_id='{self.qobj_id}', job_id='{self.job_id}', success={self.success},"
+            f" results={self.results}"
         )
         out += f", date={self.date}, status={self.status}, header={self.header}"
-        for key in self._metadata:
-            if isinstance(self._metadata[key], str):
-                value_str = "'%s'" % self._metadata[key]
+        for key, value in self._metadata.items():
+            if isinstance(value, str):
+                value_str = f"'{value}'"
             else:
-                value_str = repr(self._metadata[key])
+                value_str = repr(value)
             out += f", {key}={value_str}"
         out += ")"
         return out
@@ -132,7 +125,9 @@ class Result:
         in_data = copy.copy(data)
         in_data["results"] = [ExperimentResult.from_dict(x) for x in in_data.pop("results")]
         if in_data.get("header") is not None:
-            in_data["header"] = QobjHeader.from_dict(in_data.pop("header"))
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=DeprecationWarning, module="qiskit")
+                in_data["header"] = QobjHeader.from_dict(in_data.pop("header"))
         return cls(**in_data)
 
     def data(self, experiment=None):
@@ -236,28 +231,77 @@ class Result:
 
         except KeyError as ex:
             raise QiskitError(
-                'No memory for experiment "{}". '
+                f'No memory for experiment "{repr(experiment)}". '
                 "Please verify that you either ran a measurement level 2 job "
                 'with the memory flag set, eg., "memory=True", '
-                "or a measurement level 0/1 job.".format(repr(experiment))
+                "or a measurement level 0/1 job."
             ) from ex
 
+    # def get_counts(self, experiment=None):
+    #     """Get the histogram data of an experiment.
+
+    #     Args:
+    #         experiment (str or QuantumCircuit or Schedule or int or None): the index of the
+    #             experiment, as specified by ``data([experiment])``.
+
+    #     Returns:
+    #         dict[str, int] or list[dict[str, int]]: a dictionary or a list of
+    #         dictionaries. A dictionary has the counts for each qubit with
+    #         the keys containing a string in binary format and separated
+    #         according to the registers in circuit (e.g. ``0100 1110``).
+    #         The string is little-endian (cr[0] on the right hand side).
+
+    #     Raises:
+    #         QiskitError: if there are no counts for the experiment.
+    #     """
+    #     if experiment is None:
+    #         exp_keys = range(len(self.results))
+    #     else:
+    #         exp_keys = [experiment]
+
+    #     dict_list = []
+    #     for key in exp_keys:
+    #         exp = self._get_experiment(key)
+    #         try:
+    #             header = exp.header.to_dict()
+    #         except (AttributeError, QiskitError):  # header is not available
+    #             header = None
+
+    #         if "counts" in self.data(key).keys():
+    #             if header:
+    #                 counts_header = {
+    #                     k: v
+    #                     for k, v in header.items()
+    #                     if k in {"time_taken", "creg_sizes", "memory_slots"}
+    #                 }
+    #             else:
+    #                 counts_header = {}
+    #             dict_list.append(Counts(self.data(key)["counts"], **counts_header))
+    #         elif "statevector" in self.data(key).keys():
+    #             vec = postprocess.format_statevector(self.data(key)["statevector"])
+    #             dict_list.append(statevector.Statevector(vec).probabilities_dict(decimals=15))
+    #         else:
+    #             raise QiskitError(f'No counts for experiment "{repr(key)}"')
+
+    #     # Return first item of dict_list if size is 1
+    #     if len(dict_list) == 1:
+    #         return dict_list[0]
+    #     else:
+    #         return dict_list
+
     def get_counts(self, experiment=None):
-        """Get the histogram data of an experiment.
+        """Get the histogram data of an experiment, unified for sampler and estimator.
 
         Args:
-            experiment (str or QuantumCircuit or Schedule or int or None): the index of the
-                experiment, as specified by ``data([experiment])``.
+            experiment (str or QuantumCircuit or Schedule or int or None): 
+                The index of the experiment, as specified by ``data([experiment])``.
 
         Returns:
-            dict[str, int] or list[dict[str, int]]: a dictionary or a list of
-            dictionaries. A dictionary has the counts for each qubit with
-            the keys containing a string in binary format and separated
-            according to the registers in circuit (e.g. ``0100 1110``).
-            The string is little-endian (cr[0] on the right hand side).
+            dict[str, float] or list[dict[str, float]]: a dictionary or a list of
+            dictionaries. Compatible with Qiskit's `Counts` interface for `dm_simulator`.
 
         Raises:
-            QiskitError: if there are no counts for the experiment.
+            QiskitError: if no valid counts, partial probabilities, or density matrix found.
         """
         if experiment is None:
             exp_keys = range(len(self.results))
@@ -265,34 +309,48 @@ class Result:
             exp_keys = [experiment]
 
         dict_list = []
+        
         for key in exp_keys:
             exp = self._get_experiment(key)
             try:
                 header = exp.header.to_dict()
-            except (AttributeError, QiskitError):  # header is not available
-                header = None
+            except (AttributeError, QiskitError):
+                header = {}
 
-            if "counts" in self.data(key).keys():
-                if header:
-                    counts_header = {
-                        k: v
-                        for k, v in header.items()
-                        if k in {"time_taken", "creg_sizes", "memory_slots"}
-                    }
-                else:
-                    counts_header = {}
-                dict_list.append(Counts(self.data(key)["counts"], **counts_header))
-            elif "statevector" in self.data(key).keys():
-                vec = postprocess.format_statevector(self.data(key)["statevector"])
-                dict_list.append(statevector.Statevector(vec).probabilities_dict(decimals=15))
+            data = self.data(key)
+            
+            # --- Unified logic ---
+            if "partial_probability" in data:
+                dict_list.append(data["partial_probability"])
+
+            elif "densitymatrix" in data:
+                density_matrix = data["densitymatrix"]
+                # Extract probabilities from diagonal (real part only)
+                probs = [float(p.real) for p in density_matrix.diagonal()]
+                num_qubits = int(len(probs).bit_length() - 1)
+                bitstrings = [format(i, f'0{num_qubits}b') for i in range(len(probs))]
+                dict_list.append(dict(zip(bitstrings, probs)))
+
+            elif "counts" in data:
+                counts_header = {
+                    k: v for k, v in header.items()
+                    if k in {"time_taken", "creg_sizes", "memory_slots"}
+                }
+                dict_list.append(Counts(data["counts"], **counts_header))
+
+            elif "statevector" in data:
+                vec = postprocess.format_statevector(data["statevector"])
+                dict_list.append(
+                    statevector.Statevector(vec).probabilities_dict(decimals=15)
+                )
+
             else:
-                raise QiskitError(f'No counts for experiment "{repr(key)}"')
+                raise QiskitError(
+                    f'No valid counts, partial_probability, or densitymatrix for experiment "{repr(key)}"'
+                )
 
-        # Return first item of dict_list if size is 1
-        if len(dict_list) == 1:
-            return dict_list[0]
-        else:
-            return dict_list
+        return dict_list[0] if len(dict_list) == 1 else dict_list
+
 
     def get_statevector(self, experiment=None, decimals=None):
         """Get the final statevector of an experiment.
@@ -377,14 +435,14 @@ class Result:
             ]
 
             if len(exp) == 0:
-                raise QiskitError('Data for experiment "%s" could not be found.' % key)
+                raise QiskitError(f'Data for experiment "{key}" could not be found.')
             if len(exp) == 1:
                 exp = exp[0]
             else:
                 warnings.warn(
-                    'Result object contained multiple results matching name "%s", '
+                    f'Result object contained multiple results matching name "{key}", '
                     "only first match will be returned. Use an integer index to "
-                    "retrieve results for all entries." % key
+                    "retrieve results for all entries."
                 )
                 exp = exp[0]
 
